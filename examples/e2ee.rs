@@ -2,6 +2,7 @@
 use anyhow::{ensure, Result};
 use dumber_chat_core::{Client, Session};
 use serde_json::{json, Value};
+mod support;
 use std::{path::PathBuf, time::Duration};
 fn main() -> Result<()> {
     let file = std::env::var("CHAT_TEST_SESSIONS")?;
@@ -10,28 +11,37 @@ fn main() -> Result<()> {
     let password = "test-store-password-not-for-production-123456";
     let client = Client::new("https://nokings.chat")?.with_crypto_store(&root, password);
     let (a, b) = (&sessions[0], &sessions[1]);
-    let initial = client.sync(a, None)?;
+    let a_wire = serde_json::to_value(a)?;
+    let recipient_phone = b
+        .phone()
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("Test session must include a phone number"))?;
+    let initial = client.sync(a)?;
     if let Ok(body) = std::env::var("CHAT_EXPECT_MESSAGE") {
         ensure!(
-            initial.to_string().contains(&body),
+            serde_json::to_string(&initial)?.contains(&body),
             "Existing native device did not decrypt browser message"
         );
     }
-    client.sync(b, None)?;
-    let room = client.open_chat(a, &b.user_id)?;
-    client.join(b, &room)?;
-    client.sync(b, None)?;
-    client.sync(a, None)?;
+    client.sync(b)?;
+    let conversation = client.open_chat(a, &recipient_phone)?;
+    let room = support::room(a, &conversation.id)?;
+    client.sync(b)?;
+    client.join(b, &conversation.id)?;
+    client.sync(b)?;
+    client.sync(a)?;
     let marker = format!("Encrypted Rust test {}", uuid::Uuid::new_v4());
     let txn = uuid::Uuid::new_v4().to_string();
-    let sent = client.send_text(a, &room, &marker, &txn)?;
-    let id = sent["event_id"].as_str().unwrap();
+    let sent = client.send_text(a, &conversation.id, &marker, &txn)?;
+    let id = &sent.event_id;
     let raw: Value = reqwest::blocking::Client::new()
         .get(format!(
             "{}/_matrix/client/v3/rooms/{}/event/{}",
-            a.homeserver, room, id
+            a_wire["homeserver"].as_str().unwrap(),
+            room,
+            id
         ))
-        .bearer_auth(&a.access_token)
+        .bearer_auth(a_wire["access_token"].as_str().unwrap())
         .send()?
         .error_for_status()?
         .json()?;
@@ -43,8 +53,8 @@ fn main() -> Result<()> {
     ensure!(!raw.to_string().contains(&marker), "Message leaked");
     let mut received = false;
     for _ in 0..6 {
-        let sync = client.sync(b, None)?;
-        if sync.to_string().contains(&marker) {
+        let sync = client.sync(b)?;
+        if serde_json::to_string(&sync)?.contains(&marker) {
             received = true;
             break;
         }
@@ -52,10 +62,15 @@ fn main() -> Result<()> {
     }
     ensure!(received, "Recipient did not decrypt encrypted message");
     let reply = format!("Reply {marker}");
-    client.send_text(b, &room, &reply, &uuid::Uuid::new_v4().to_string())?;
+    client.send_text(
+        b,
+        &conversation.id,
+        &reply,
+        &uuid::Uuid::new_v4().to_string(),
+    )?;
     let mut received = false;
     for _ in 0..6 {
-        if client.sync(a, None)?.to_string().contains(&reply) {
+        if serde_json::to_string(&client.sync(a)?)?.contains(&reply) {
             received = true;
             break;
         }
@@ -67,32 +82,21 @@ fn main() -> Result<()> {
     )?;
     let backup = root.join("backup.txt");
     if let Ok(import) = std::env::var("CHAT_IMPORT_BACKUP") {
-        let response: Value = serde_json::from_str(&dumber_chat_core::invoke(&json!({"command":"import_keys","service":"https://nokings.chat","session":a,"store_path":root,"store_password":password,"path":import,"passphrase":"backup-password-123"}).to_string()))?;
-        ensure!(
-            response["ok"] == true,
-            "Browser key export failed to import in native SDK"
-        );
+        client.import_keys(a, import, "backup-password-123")?;
     }
-    let invoke = |command: &str, passphrase: &str| -> Result<Value> {
-        let response:Value=serde_json::from_str(&dumber_chat_core::invoke(&json!({"command":command,"service":"https://nokings.chat","session":a,"store_path":root,"store_password":password,"path":backup,"passphrase":passphrase}).to_string()))?;
-        Ok(response)
-    };
-    ensure!(
-        invoke("export_keys", "backup-password-123")?["ok"] == true,
-        "Export failed"
-    );
+    client.export_keys(a, &backup, "backup-password-123")?;
     ensure!(
         !std::fs::read_to_string(&backup)?.contains("session_key"),
         "Export not encrypted"
     );
     ensure!(
-        invoke("import_keys", "incorrect-passphrase")?["ok"] == false,
+        client
+            .import_keys(a, &backup, "incorrect-passphrase")
+            .is_err(),
         "Wrong password accepted"
     );
-    ensure!(
-        invoke("import_keys", "backup-password-123")?["ok"] == true,
-        "Import failed"
-    );
+    let imported = client.import_keys(a, &backup, "backup-password-123")?;
+    ensure!(imported.total_count > 0, "Export contained no message keys");
     println!("PASS: SDK two-way encryption, ciphertext on Synapse, encrypted key export/import, wrong-password rejection");
     Ok(())
 }

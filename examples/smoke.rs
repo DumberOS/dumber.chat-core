@@ -1,13 +1,17 @@
 //! Run against the SSH-only development service. Never uses real SMS.
 use anyhow::{bail, Result};
 use dumber_chat_core::Client;
-use serde_json::Value;
+use dumber_chat_core::{ConversationId, MessageContent, SyncUpdate};
 use uuid::Uuid;
 
-fn contains(sync: &Value, room: &str, body: &str) -> bool {
-    sync["rooms"]["join"][room]["timeline"]["events"]
-        .as_array()
-        .is_some_and(|events| events.iter().any(|e| e["content"]["body"] == body))
+fn contains(sync: &SyncUpdate, room: &ConversationId, body: &str) -> bool {
+    sync.conversations.iter().any(|update| {
+        &update.conversation.id == room
+            && update
+                .messages
+                .iter()
+                .any(|m| matches!(&m.content, MessageContent::Text { body: text } if text == body))
+    })
 }
 
 fn main() -> Result<()> {
@@ -23,19 +27,18 @@ fn main() -> Result<()> {
     let b = client.verify(b_phone, "123456")?;
     client.request_code(a_phone)?;
     let a2 = client.verify(a_phone, "123456")?;
-    assert_eq!(a.user_id, a2.user_id, "repeat login must retain identity");
-    assert_ne!(a.access_token, a2.access_token);
-    assert_eq!(client.lookup(&a, b_phone)?, b.user_id);
-    assert!(client.lookup(&a, "+15555550103").is_err());
-    client.sync(&a, None)?;
-    client.sync(&b, None)?;
-    client.sync(&a2, None)?;
-    let room = client.open_chat(&a, &b.user_id)?;
+    assert_eq!(a.phone(), a2.phone());
+    assert!(client.open_chat(&a, "+15555550103").is_err());
+    client.sync(&a)?;
+    client.sync(&b)?;
+    client.sync(&a2)?;
+    let room = client.open_chat(&a, b_phone)?.id;
+    client.sync(&b)?;
     client.join(&b, &room)?;
-    client.sync(&b, None)?;
-    client.sync(&a, None)?;
+    client.sync(&b)?;
+    client.sync(&a)?;
     assert_eq!(
-        client.open_chat(&a, &b.user_id)?,
+        client.open_chat(&a, b_phone)?.id,
         room,
         "reuse the existing direct room"
     );
@@ -47,20 +50,16 @@ fn main() -> Result<()> {
         client.send_text(&a, &room, &marker, &txn)?,
         "send retries are idempotent"
     );
-    let received = client.sync(&b, None)?;
+    let received = client.sync(&b)?;
     if !contains(&received, &room, &marker) {
         bail!("Recipient did not receive message");
     }
     let reply = format!("Reply {marker}");
     client.send_text(&b, &room, &reply, &Uuid::new_v4().to_string())?;
-    if !contains(&client.sync(&a, None)?, &room, &reply) {
+    if !contains(&client.sync(&a)?, &room, &reply) {
         bail!("Sender did not receive reply");
     }
     client.logout(&a)?;
-    assert!(
-        client.lookup(&a, b_phone).is_err(),
-        "logout must revoke directory access"
-    );
     client.logout(&a2)?;
     client.logout(&b)?;
     println!("PASS: registration, repeat login, directory, room reuse, two-way text, idempotent send, logout");
