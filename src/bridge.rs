@@ -144,10 +144,14 @@ struct Request {
 enum Operation {
     RequestCode {
         phone: String,
+        #[serde(default)]
+        registration_kind: Option<crate::RegistrationKind>,
     },
     Verify {
         phone: String,
         code: String,
+        #[serde(default)]
+        registration_kind: Option<crate::RegistrationKind>,
     },
     SessionStatus,
     PairingReview {
@@ -205,6 +209,21 @@ enum Operation {
         body: String,
         transaction_id: String,
     },
+    SetCallCapability {
+        enabled: bool,
+    },
+    CallCapability {
+        phone: String,
+    },
+    TurnConfig,
+    SendCall {
+        conversation_id: ConversationId,
+        signal: CallSignal,
+        transaction_id: String,
+    },
+    AcknowledgeCalls {
+        event_ids: Vec<String>,
+    },
     Sync,
     Devices {
         #[serde(default)]
@@ -237,9 +256,27 @@ fn run(request: Request) -> Result<Value> {
     use Operation::*;
     let operation = request.operation;
     match operation {
-        RequestCode { phone } => return Ok(serde_json::to_value(client.request_code(&phone)?)?),
-        Verify { phone, code } => {
-            return Ok(serde_json::to_value(client.verify(&phone, &code)?.info()?)?)
+        RequestCode {
+            phone,
+            registration_kind,
+        } => {
+            return Ok(serde_json::to_value(match registration_kind {
+                Some(kind) => client.request_code_for(&phone, kind)?,
+                None => client.request_code(&phone)?,
+            })?)
+        }
+        Verify {
+            phone,
+            code,
+            registration_kind,
+        } => {
+            return Ok(serde_json::to_value(
+                match registration_kind {
+                    Some(kind) => client.verify_for(&phone, &code, kind)?,
+                    None => client.verify(&phone, &code)?,
+                }
+                .info()?,
+            )?)
         }
         _ => {}
     }
@@ -317,6 +354,26 @@ fn run(request: Request) -> Result<Value> {
             &body,
             &transaction_id,
         )?)?,
+        SetCallCapability { enabled } => {
+            client.set_call_capability(&session, enabled)?;
+            Value::Null
+        }
+        CallCapability { phone } => {
+            serde_json::to_value(client.call_capability(&session, &phone)?)?
+        }
+        TurnConfig => serde_json::to_value(client.turn_config(&session)?)?,
+        SendCall {
+            conversation_id,
+            signal,
+            transaction_id,
+        } => {
+            client.send_call(&session, &conversation_id, &signal, &transaction_id)?;
+            Value::Null
+        }
+        AcknowledgeCalls { event_ids } => {
+            client.acknowledge_calls(&session, &event_ids)?;
+            Value::Null
+        }
         Sync => serde_json::to_value(client.sync(&session)?)?,
         Devices { phone } => serde_json::to_value(client.devices(&session, phone.as_deref())?)?,
         ExportKeys { path, passphrase } => {

@@ -265,3 +265,29 @@ reserved sessions with phone fields), and `CHAT_TEST_STORE`. It checks delivery,
 ciphertext, creation retries, admin handover, and exports the recipient's keys to
 test that pre-join and post-removal events cannot be decrypted. Run it only on a
 private test service with dedicated sessions; revoke sessions after testing.
+
+
+## Typed encrypted call signaling
+
+`set_call_capability`, `call_capability`, `turn_config`, `send_call`, and
+`acknowledge_calls` expose call support without giving a host raw Matrix events.
+`SyncUpdate.calls` contains `CallEvent` values separately from chat messages.
+`CallSignal` carries a `CallKind`, call/party IDs, timestamp, and bounded typed SDP
+or candidate fields. The bridge exposes equivalent `set_call_capability`,
+`call_capability`, `turn_config`, `send_call`, `acknowledge_calls` operations;
+this is an additive API v2 extension.
+
+Only decrypted events from the other member of a joined direct conversation are
+accepted. Plaintext, groups, wrong senders, expired signals and replayed event IDs
+are rejected. SDP must contain one DTLS-SRTP audio section and a SHA-256 certificate
+fingerprint. An invite lives at most 45 seconds and renegotiation 15 seconds;
+other events live 60 seconds. The bounded durable inbox remains in the encrypted
+store until the host acknowledges delivery or events expire, allowing a Binder
+consumer to reconnect. It must not be displayed as a message or counted unread.
+The host owns ringing, timeouts, answer selection, deduplication across process
+restarts, block policy and media. TURN passwords must never be logged.
+
+A host sends all signals through `send_call` with a stable transaction ID across
+retries. The core requires an encrypted room with exactly two joined members and
+uses the SDK's encrypted raw-event send path. This uses the existing message
+trust policy; it does not add a separate identity verification workflow.

@@ -1,4 +1,4 @@
-//! Reserved accounts only, through scripts/availability-smoke-server.py over SSH.
+//! Reserved accounts only, through the backend’s scripts/availability-smoke-server.py over SSH.
 use anyhow::{ensure, Result};
 use dumber_chat_core::{Client, RecipientUnavailable, Session};
 use serde_json::{json, Value};

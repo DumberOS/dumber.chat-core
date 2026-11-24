@@ -4,6 +4,10 @@ package chat.dumber.sdk
 interface ChatApi {
     fun requestCode(phone: String): CodeRequest
     fun verify(phone: String, code: String): Session
+    fun requestCode(phone: String, kind: RegistrationKind): CodeRequest =
+        if (kind == RegistrationKind.MESSAGING) requestCode(phone) else throw ChatException("Separate calling registration unsupported", ErrorKind.UPGRADE_REQUIRED)
+    fun verify(phone: String, code: String, kind: RegistrationKind): Session =
+        if (kind == RegistrationKind.MESSAGING) verify(phone, code) else throw ChatException("Separate calling registration unsupported", ErrorKind.UPGRADE_REQUIRED)
     fun sessionStatus(): SessionStatus
     fun reviewPairing(code: String): PairingReview
     fun approvePairing(code: String): PairingReview
@@ -20,6 +24,11 @@ interface ChatApi {
     fun join(conversationId: String)
     fun leave(conversationId: String)
     fun sendText(conversationId: String, body: String, transactionId: String): SentMessage
+    fun setCallCapability(enabled: Boolean) { throw ChatException("Calling unsupported", ErrorKind.UPGRADE_REQUIRED) }
+    fun callCapability(phone: String): Boolean = throw ChatException("Calling unsupported", ErrorKind.UPGRADE_REQUIRED)
+    fun turnConfig(): TurnConfig = throw ChatException("Calling unsupported", ErrorKind.UPGRADE_REQUIRED)
+    fun sendCall(conversationId: String, signal: CallSignal, transactionId: String) { throw ChatException("Calling unsupported", ErrorKind.UPGRADE_REQUIRED) }
+    fun acknowledgeCalls(eventIds: List<String>) { throw ChatException("Calling unsupported", ErrorKind.UPGRADE_REQUIRED) }
     fun sync(): SyncUpdate
     fun devices(phone: String? = null): DeviceList
     fun exportKeys(path: String, passphrase: String)

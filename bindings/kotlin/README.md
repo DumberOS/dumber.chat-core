@@ -61,3 +61,20 @@ Do not mix old binaries with this binding. No local-data migration is supplied.
 `src/test/kotlin` contains Robolectric/JUnit binding tests. DPAD runs these together
 with its chat integration tests. Application tests should inject `ChatApi` fakes;
 only binding tests need knowledge of the serialized envelope.
+
+
+`ChatApi` also provides `setCallCapability`, `callCapability`, `turnConfig`,
+`sendCall`, and `acknowledgeCalls`. `SyncUpdate.calls` is separate from chat
+messages. Process and acknowledge these typed events from a worker thread;
+`CallSignal`/`CallKind` and `IceCandidate` keep wire event names out of the host.
+Account credentials stay in the SDK owner. A media host only needs the call
+signals and temporary `TurnConfig`; its `toString` redacts credentials.
+
+
+Select `RegistrationKind.MESSAGING`, `CALLS`, or `BOTH` in both
+`requestCode(phone, kind)` and `verify(phone, code, kind)` for protocol-3 registration.
+`BOTH` creates one shared session occupying both slots. Replacing either slot logs
+that combined client out completely. Existing overloads keep protocol-2 compatibility;
+new servers interpret them as messaging registrations, with legacy calling support
+able to reserve a free calling slot. Protocol 3 never falls back on older servers.
+Slots are replacement policies, not cryptographic access scopes.

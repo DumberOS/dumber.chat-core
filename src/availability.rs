@@ -165,26 +165,58 @@ mod tests {
     fn server(
         responses: Vec<(u16, serde_json::Value)>,
     ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        server_routes(
+            responses
+                .into_iter()
+                .map(|(status, body)| ("/api/directory/lookup", status, body))
+                .collect(),
+        )
+    }
+    fn server_routes(
+        responses: Vec<(&'static str, u16, serde_json::Value)>,
+    ) -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
         let worker = std::thread::spawn(move || {
-            for (status, body) in responses {
+            for (path, status, body) in responses {
                 let (mut socket, _) = listener.accept().unwrap();
                 socket
                     .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                     .unwrap();
                 let mut request = [0; 8192];
                 let read = socket.read(&mut request).unwrap();
-                assert!(String::from_utf8_lossy(&request[..read])
-                    .starts_with("POST /api/directory/lookup "));
+                assert!(
+                    String::from_utf8_lossy(&request[..read]).starts_with(&format!("POST {path} "))
+                );
                 count.fetch_add(1, Ordering::SeqCst);
                 let body = body.to_string();
                 write!(socket,"HTTP/1.1 {status} Reply\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
             }
         });
         (url, calls, worker)
+    }
+    #[test]
+    fn explicit_call_rechecks_a_cached_unavailable_recipient() -> Result<()> {
+        let _runtime_guard = crate::encryption::runtime().enter();
+        let (url, calls, server) = server_routes(vec![
+            ("/api/directory/lookup", 404, json!({"detail":"absent"})),
+            ("/api/directory/lookup", 200, json!({"user_id":"@b:x"})),
+            ("/api/calls/lookup", 200, json!({"supported":true})),
+        ]);
+        let (client, session, crypto) = fixture(&url)?;
+        assert_eq!(
+            client
+                .check_recipient(&session, "+15555550102", false)?
+                .availability,
+            Availability::Unavailable
+        );
+        assert!(client.call_capability(&session, "+15555550102")?.supported);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert!(crypto.load_addresses()?.room_metadata.is_empty());
+        server.join().unwrap();
+        Ok(())
     }
     #[test]
     fn concurrent_checks_reuse_positive_without_creating_rooms() -> Result<()> {

@@ -25,6 +25,8 @@ class ChatClient internal constructor(private val config: ChatConfig, private va
     private fun obj(command: String, vararg arguments: Pair<String, Any?>) = call(command, *arguments) as JSONObject
     override fun requestCode(phone: String) = obj("request_code", "phone" to phone).let { CodeRequest(it.getString("status"), it.getBoolean("development")) }
     override fun verify(phone: String, code: String) = Wire.session(obj("verify", "phone" to phone, "code" to code))
+    override fun requestCode(phone: String, kind: RegistrationKind) = obj("request_code", "phone" to phone, "registration_kind" to kind.name.lowercase(java.util.Locale.ROOT)).let { CodeRequest(it.getString("status"), it.getBoolean("development")) }
+    override fun verify(phone: String, code: String, kind: RegistrationKind) = Wire.session(obj("verify", "phone" to phone, "code" to code, "registration_kind" to kind.name.lowercase(java.util.Locale.ROOT)))
     override fun sessionStatus() = obj("session_status").let { SessionStatus(Wire.enum(it.getString("role")), it.getBoolean("main_active")) }
     override fun reviewPairing(code: String) = Wire.pairing(obj("pairing_review", "code" to code))
     override fun approvePairing(code: String) = Wire.pairing(obj("pairing_approve", "code" to code))
@@ -41,13 +43,31 @@ class ChatClient internal constructor(private val config: ChatConfig, private va
     override fun join(conversationId: String) { call("join", "conversation_id" to conversationId) }
     override fun leave(conversationId: String) { call("leave", "conversation_id" to conversationId) }
     override fun sendText(conversationId: String, body: String, transactionId: String) = obj("send_text", "conversation_id" to conversationId, "body" to body, "transaction_id" to transactionId).let { SentMessage(it.getString("event_id"), it.getBoolean("encrypted")) }
+    override fun setCallCapability(enabled: Boolean) { call("set_call_capability", "enabled" to enabled) }
+    override fun callCapability(phone: String) = obj("call_capability", "phone" to phone).getBoolean("supported")
+    override fun turnConfig() = obj("turn_config").let { v -> TurnConfig(v.getJSONArray("uris").let { a -> (0 until a.length()).map { a.getString(it) } }, v.getString("username"), v.getString("password"), v.getLong("ttl")) }
+    override fun sendCall(conversationId: String, signal: CallSignal, transactionId: String) { call("send_call", "conversation_id" to conversationId, "signal" to CallWire.encode(signal), "transaction_id" to transactionId) }
+    override fun acknowledgeCalls(eventIds: List<String>) { call("acknowledge_calls", "event_ids" to eventIds) }
     override fun sync() = obj("sync").let { SyncUpdate(it.getJSONArray("conversations").objects { update ->
         ConversationUpdate(Wire.conversation(update.getJSONObject("conversation")), update.getJSONArray("messages").objects(Wire::message), update.getBoolean("limited"))
-    }, it.getBoolean("contacts_pending")) }
+    }, it.getBoolean("contacts_pending"), it.optJSONArray("calls")?.objects(CallWire::event) ?: emptyList()) }
     override fun devices(phone: String?) = obj("devices", "phone" to phone).let { data -> DeviceList(Wire.contact(data.getJSONObject("contact")), data.getString("current_device_id"), data.nullableString("current_device_fingerprint"), data.getJSONArray("devices").objects {
         Device(it.getString("device_id"), it.nullableString("name"), it.getBoolean("verified"), it.nullableString("fingerprint"))
     }) }
     override fun exportKeys(path: String, passphrase: String) { call("export_keys", "path" to path, "passphrase" to passphrase) }
     override fun importKeys(path: String, passphrase: String) = obj("import_keys", "path" to path, "passphrase" to passphrase).let { KeyImport(it.getLong("imported"), it.getLong("total")) }
     override fun logout() { call("logout") }
+}
+
+internal object CallWire {
+    fun encode(s: CallSignal) = JSONObject().put("kind", s.kind.name.lowercase(java.util.Locale.ROOT))
+        .put("call_id", s.callId).put("party_id", s.partyId).put("sent_at_ms", s.sentAtMs)
+        .put("sdp", s.sdp).put("description_type", s.descriptionType).put("selected_party_id", s.selectedPartyId)
+        .put("reason", s.reason).put("candidates", JSONArray(s.candidates.map { c -> JSONObject()
+            .put("candidate", c.candidate).put("sdp_mid", c.sdpMid).put("sdp_m_line_index", c.sdpMLineIndex) }))
+    fun decode(v: JSONObject) = CallSignal(Wire.enum(v.getString("kind")), v.getString("call_id"), v.getString("party_id"),
+        v.getLong("sent_at_ms"), v.nullableString("sdp"), v.nullableString("description_type"),
+        v.getJSONArray("candidates").objects { c -> IceCandidate(c.getString("candidate"), c.getString("sdp_mid"), c.getInt("sdp_m_line_index")) },
+        v.nullableString("selected_party_id"), v.nullableString("reason"))
+    fun event(v: JSONObject) = CallEvent(v.getString("event_id"), v.getString("conversation_id"), Wire.contact(v.getJSONObject("sender")), v.getLong("expires_at_ms"), decode(v.getJSONObject("signal")))
 }

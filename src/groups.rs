@@ -450,7 +450,10 @@ mod tests {
                     let body: Value = serde_json::from_str(body).unwrap();
                     if body["creation_content"]["type"] == GROUP_TYPE {
                         group_creations += 1;
-                        assert_eq!(body["invite"].as_array().unwrap().len(), if solo { 0 } else { 2 });
+                        assert_eq!(
+                            body["invite"].as_array().unwrap().len(),
+                            if solo { 0 } else { 2 }
+                        );
                         assert_eq!(body["power_level_content_override"]["invite"], 100);
                         assert!(body["initial_state"]
                             .as_array()
@@ -484,7 +487,9 @@ mod tests {
                         {"type":"m.room.member","state_key":"@b:x","content":{"membership":"join"}},
                         {"type":"m.room.member","state_key":"@c:x","content":{"membership":"leave"}}
                     ]);
-                    if solo { events.as_array_mut().unwrap().truncate(3); }
+                    if solo {
+                        events.as_array_mut().unwrap().truncate(3);
+                    }
                     events
                 };
                 let body = response.to_string();
@@ -503,7 +508,11 @@ mod tests {
         book.remember_phone("@c:x", "+15555550103");
         crypto.save_addresses(&book)?;
         let client = Client::new(&base)?.with_crypto_store(&root, password);
-        let numbers = if solo { vec![] } else { vec!["+15555550102".into(), "+15555550103".into()] };
+        let numbers = if solo {
+            vec![]
+        } else {
+            vec!["+15555550102".into(), "+15555550103".into()]
+        };
         let group = client.create_group(&session, "Friends", &numbers, "stable-operation")?;
         assert_eq!(group.kind, ConversationKind::Group);
         assert!(group.capabilities.manage);
@@ -531,12 +540,17 @@ mod tests {
     #[test]
     fn participant_lookup_errors_are_actionable_without_exposing_server_details() -> Result<()> {
         use std::io::{BufRead, BufReader, Write};
-        for (status, expected) in [(404, crate::ErrorKind::RecipientUnavailable), (429, crate::ErrorKind::RateLimited)] {
+        for (status, expected) in [
+            (404, crate::ErrorKind::RecipientUnavailable),
+            (429, crate::ErrorKind::RateLimited),
+        ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
             let base = format!("http://{}", listener.local_addr()?);
             let server = std::thread::spawn(move || {
                 let (mut socket, _) = listener.accept().unwrap();
-                socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
                 let mut reader = BufReader::new(&mut socket);
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
@@ -544,7 +558,9 @@ mod tests {
                 loop {
                     line.clear();
                     assert!(reader.read_line(&mut line).unwrap() > 0);
-                    if line == "\r\n" { break; }
+                    if line == "\r\n" {
+                        break;
+                    }
                 }
                 let body = json!({"detail":"private server diagnostics"}).to_string();
                 write!(socket, "HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();

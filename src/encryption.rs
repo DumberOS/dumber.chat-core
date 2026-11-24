@@ -413,6 +413,17 @@ impl EncryptedClient {
         })
     }
 
+    pub(crate) fn send_call(&self, id: &str, kind: &str, content: Value, txn: &str) -> Result<()> {
+        runtime().block_on(async {
+            let room = self.ensure_encrypted(id).await?;
+            room.send_raw(kind, content)
+                .with_transaction_id(txn.into())
+                .await
+                .map_err(send_error)?;
+            Ok(())
+        })
+    }
+
     pub fn sync(&self, retry: Option<&Value>) -> Result<Value> {
         runtime().block_on(async {
             if self.pending.lock().unwrap().is_empty() {

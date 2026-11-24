@@ -16,6 +16,54 @@ class ChatClientTest {
         listOf(GroupMember(Contact("contact_a",null),Membership.JOINED,true)),GroupCapabilities(true,true),emptyList(),Membership.JOINED)
     private val message = Message("event_a",Contact("contact_a",null),42,MessageContent.Text("quote \" newline\n💬"),true,"retry-id")
 
+    @Test fun callingRegistrationExplicitlySelectsCallsSlot() {
+        val operations = mutableListOf<String>()
+        val client = ChatClient(ChatConfig("http://127.0.0.1:9")) { request ->
+            val operation = JSONObject(request).getJSONObject("operation")
+            assertEquals("calls", operation.getString("registration_kind"))
+            assertEquals("+15555550101", operation.getString("phone"))
+            val command = operation.getString("command")
+            operations.add(command)
+            if (command == "request_code") """{"ok":true,"data":{"status":"pending","development":true}}"""
+            else {
+                assertEquals("123456", operation.getString("code"))
+                """{"ok":true,"data":${ChatStorage.encodeSession(session)}}"""
+            }
+        }
+        assertEquals("pending", client.requestCode("+15555550101", RegistrationKind.CALLS).status)
+        assertEquals(session, client.verify("+15555550101", "123456", RegistrationKind.CALLS))
+        assertEquals(listOf("request_code", "verify"), operations)
+    }
+
+    @Test fun callSignalsStayTypedAndSeparateFromMessages() {
+        val signal=CallSignal(CallKind.CANDIDATES,"call-a","party-b",1234,
+            candidates=listOf(IceCandidate("candidate:1","0",0)))
+        assertEquals(signal,CallWire.decode(CallWire.encode(signal)))
+        val wireEvent=JSONObject().put("event_id","event-call").put("conversation_id","conversation_a")
+            .put("sender",JSONObject().put("id","contact_b").put("phone","+15555550102"))
+            .put("expires_at_ms",61234).put("signal",CallWire.encode(signal))
+        val client=ChatClient(config) { request ->
+            val operation=JSONObject(request).getJSONObject("operation")
+            when(operation.getString("command")) {
+                "sync" -> JSONObject().put("ok",true).put("data",JSONObject()
+                    .put("conversations",org.json.JSONArray()).put("contacts_pending",false)
+                    .put("calls",org.json.JSONArray().put(wireEvent))).toString()
+                "send_call" -> {
+                    assertEquals("conversation_a",operation.getString("conversation_id"))
+                    assertEquals("retry-call",operation.getString("transaction_id"))
+                    assertEquals(signal,CallWire.decode(operation.getJSONObject("signal")))
+                    """{"ok":true,"data":null}"""
+                }
+                else -> error("Unexpected operation")
+            }
+        }
+        val update=client.sync()
+        assertTrue(update.conversations.isEmpty())
+        assertEquals(signal,update.calls.single().signal)
+        client.sendCall("conversation_a",signal,"retry-call")
+        assertFalse(TurnConfig(listOf("turn:example.org"),"private-user","private-password",60).toString().contains("private"))
+    }
+
     @Test fun codecsPreserveOpaqueIdsNullsAndMessageVariantsWithoutLeakingSecretsInLogs() {
         assertEquals(session,ChatStorage.decodeSession(ChatStorage.encodeSession(session)))
         assertEquals(group,ChatStorage.decodeConversation(ChatStorage.encodeConversation(group)))

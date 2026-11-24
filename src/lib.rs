@@ -36,7 +36,9 @@ mod availability;
 mod bridge;
 pub use availability::{Availability, RecipientStatus};
 pub use bridge::{invoke, ErrorKind, Failure, SessionInfo, API_VERSION};
+mod calls;
 mod catchup;
+pub use calls::*;
 mod encryption;
 mod groups;
 pub use api::*;
@@ -189,21 +191,62 @@ impl Client {
     }
 
     fn request_code_raw(&self, phone: &str) -> Result<Value> {
+        self.registration_request("request-code", phone, None, None)
+    }
+
+    fn registration_request(
+        &self,
+        operation: &str,
+        phone: &str,
+        code: Option<&str>,
+        kind: Option<RegistrationKind>,
+    ) -> Result<Value> {
+        // Protocol 3 must fail closed on older servers: never replace messaging
+        // accidentally when the host requested a separate calling registration.
+        let mut body = json!({"phone":phone,"protocol":if kind.is_some() {3} else {2}});
+        if let Some(kind) = kind {
+            body["registration_kind"] = json!(kind);
+        }
+        if let Some(code) = code {
+            body["code"] = json!(code);
+        }
         self.request(
             Method::POST,
-            &format!("{}/api/auth/request-code", self.service),
+            &format!("{}/api/auth/{operation}", self.service),
             None,
-            Some(json!({"phone":phone,"protocol":2})),
+            Some(body),
         )
     }
 
-    pub fn verify(&self, phone: &str, code: &str) -> Result<Session> {
-        let phone = api::phone(phone)?;
-        let mut session: Session = serde_json::from_value(self.request(
-            Method::POST,
-            &format!("{}/api/auth/verify", self.service),
+    pub fn request_code_for(&self, phone: &str, kind: RegistrationKind) -> Result<CodeRequest> {
+        Ok(serde_json::from_value(self.registration_request(
+            "request-code",
+            api::phone(phone)?,
             None,
-            Some(json!({"phone":phone,"code":code,"protocol":2})),
+            Some(kind),
+        )?)?)
+    }
+
+    pub fn verify(&self, phone: &str, code: &str) -> Result<Session> {
+        self.verify_registration(phone, code, None)
+    }
+
+    pub fn verify_for(&self, phone: &str, code: &str, kind: RegistrationKind) -> Result<Session> {
+        self.verify_registration(phone, code, Some(kind))
+    }
+
+    fn verify_registration(
+        &self,
+        phone: &str,
+        code: &str,
+        kind: Option<RegistrationKind>,
+    ) -> Result<Session> {
+        let phone = api::phone(phone)?;
+        let mut session: Session = serde_json::from_value(self.registration_request(
+            "verify",
+            phone,
+            Some(code),
+            kind,
         )?)?;
         session.phone = Some(phone.to_owned());
         Ok(session)
@@ -554,6 +597,95 @@ mod tests {
         client.logout(&session).unwrap();
         server.join().unwrap();
     }
+    #[test]
+    fn calling_registration_is_explicit_and_never_falls_back_to_messaging() {
+        use std::io::{Read, Write};
+        for (kind, reject) in [
+            ("messaging", false),
+            ("calls", false),
+            ("both", false),
+            ("calls", true),
+            ("both", true),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server_base = base.clone();
+            let server = std::thread::spawn(move || {
+                for operation in ["request-code", "verify"] {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    let mut buffer = [0u8; 4096];
+                    loop {
+                        let count = socket.read(&mut buffer).unwrap();
+                        assert!(count > 0);
+                        bytes.extend_from_slice(&buffer[..count]);
+                        let text = String::from_utf8_lossy(&bytes);
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let length = text[..end]
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_lowercase()
+                                        .strip_prefix("content-length: ")
+                                        .and_then(|n| n.parse::<usize>().ok())
+                                })
+                                .unwrap_or(0);
+                            if bytes.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    let request = String::from_utf8(bytes).unwrap();
+                    assert!(request.starts_with(&format!("POST /api/auth/{operation} ")));
+                    let body: Value =
+                        serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+                    assert_eq!(body["protocol"], 3);
+                    assert_eq!(body["registration_kind"], kind);
+                    let response = if reject {
+                        json!({"detail":"Update required"})
+                    } else if operation == "request-code" {
+                        json!({"status":"pending","development":true})
+                    } else {
+                        json!({"homeserver":server_base,"user_id":"@test:example.org","device_id":"calls","access_token":"secret"})
+                    };
+                    let response = response.to_string();
+                    let status = if reject {
+                        "426 Upgrade Required"
+                    } else {
+                        "200 OK"
+                    };
+                    write!(socket,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",response.len(),response).unwrap();
+                }
+            });
+            for command in ["request_code", "verify"] {
+                let mut operation =
+                    json!({"command":command,"phone":"+15555550101","registration_kind":kind});
+                if command == "verify" {
+                    operation["code"] = json!("123456");
+                }
+                let response: Value = serde_json::from_str(&invoke(
+                    &json!({"api_version":2,"service":base,"operation":operation}).to_string(),
+                ))
+                .unwrap();
+                assert_eq!(response["ok"], !reject);
+                if reject {
+                    assert_eq!(response["error_kind"], "upgrade_required");
+                } else if command == "verify" {
+                    assert!(response["data"]["device_id"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("device_"));
+                }
+            }
+            server.join().unwrap();
+        }
+        let response: Value = serde_json::from_str(&invoke(&json!({"api_version":2,"service":"http://127.0.0.1:9","operation":{"command":"verify","phone":"+15555550101","code":"123456","registration_kind":"extra"}}).to_string())).unwrap();
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error_kind"], "invalid_input");
+    }
+
     #[test]
     fn pairing_validation_and_revocation_errors_are_typed() {
         let failure = HttpFailure {

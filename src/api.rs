@@ -6,6 +6,16 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
 
+/// Independently replaceable phone registration slots, enforced by the server.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistrationKind {
+    #[default]
+    Messaging,
+    Calls,
+    Both,
+}
+
 /// Session ownership is assigned and enforced by the server.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,6 +128,8 @@ pub struct ConversationUpdate {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
     pub conversations: Vec<ConversationUpdate>,
+    #[serde(default)]
+    pub calls: Vec<crate::CallEvent>,
     /// Directory availability does not prevent message delivery. Unknown phones
     /// are retried on subsequent syncs.
     pub contacts_pending: bool,
@@ -162,6 +174,10 @@ pub struct KeyImport {
 
 #[derive(Default, Serialize, Deserialize)]
 pub(crate) struct AddressBook {
+    #[serde(default)]
+    pub(crate) call_inbox: BTreeMap<String, crate::CallEvent>,
+    #[serde(default)]
+    pub(crate) call_seen: BTreeMap<String, u64>,
     pub(crate) phones: BTreeMap<String, String>, // Matrix user ID -> phone
     #[serde(default)]
     pub(crate) by_phone: BTreeMap<String, String>, // Phone -> pinned Matrix identity
@@ -230,7 +246,7 @@ impl AddressBook {
         }
     }
 
-    fn conversation(&self, id: &ConversationId, own_user: &str) -> Conversation {
+    pub(crate) fn conversation(&self, id: &ConversationId, own_user: &str) -> Conversation {
         let stored = &self.conversations[id];
         let metadata = self
             .room_metadata
@@ -263,7 +279,7 @@ impl AddressBook {
         }
     }
 
-    fn room(&self, id: &ConversationId) -> Result<&str> {
+    pub(crate) fn room(&self, id: &ConversationId) -> Result<&str> {
         Ok(&self
             .conversations
             .get(id)
@@ -286,6 +302,11 @@ impl AddressBook {
 
     pub(crate) fn message(&mut self, room: &str, event: &Value) -> Option<Message> {
         if event["type"] != "m.room.message" {
+            if event["e2ee"] == true {
+                if let Some(id) = event["event_id"].as_str() {
+                    self.retries.remove(id);
+                }
+            }
             return None;
         }
         let event_id = event["event_id"].as_str()?.to_owned();
@@ -680,6 +701,13 @@ impl Client {
             let conversations = batches
                 .into_iter()
                 .map(|(id, room, update)| {
+                    for event in update["timeline"]["events"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                    {
+                        crate::calls::receive(&mut book, &id, session, event);
+                    }
                     let messages = update["timeline"]["events"]
                         .as_array()
                         .into_iter()
@@ -693,9 +721,33 @@ impl Client {
                     }
                 })
                 .collect();
+            let now = crate::availability::now();
+            book.call_inbox.retain(|_, e| e.expires_at_ms > now);
+            book.call_seen.retain(|_, expiry| *expiry > now);
+            // A directory lookup may recover after the original signaling sync.
+            // Keep pending invitations useful until their bounded lifetime expires.
+            let resolved: Vec<_> = book
+                .call_inbox
+                .iter()
+                .map(|(id, event)| {
+                    let sender = book
+                        .conversation(&event.conversation_id, &session.user_id)
+                        .participants
+                        .into_iter()
+                        .find(|c| c.id == event.sender.id);
+                    (id.clone(), sender)
+                })
+                .collect();
+            for (id, sender) in resolved {
+                if let Some(sender) = sender {
+                    book.call_inbox.get_mut(&id).unwrap().sender = sender;
+                }
+            }
+            let calls = book.call_inbox.values().cloned().collect();
             crypto.save_addresses(&book)?;
             Ok(SyncUpdate {
                 conversations,
+                calls,
                 contacts_pending,
             })
         })();
@@ -802,6 +854,43 @@ mod tests {
             ("@bob:example.org".into(), "join".into()),
         ]);
         (session, book, id)
+    }
+
+    #[test]
+    fn call_inbox_rejects_plaintext_replay_wrong_sender_and_expiry() {
+        let (session, mut book, id) = fixture();
+        let now = crate::availability::now();
+        book.room_metadata.insert("!room:example.org".into(), serde_json::from_value(json!({
+            "membership":"join", "members":{"@alice:example.org":"join","@bob:example.org":"join"},
+            "name":null, "create":{"creator":"@alice:example.org"}, "power":{}, "group":false
+        })).unwrap());
+        let mut e = json!({"type":"m.call.hangup","event_id":"$call","sender":"@bob:example.org",
+            "e2ee":false,"content":{"version":"1","call_id":"test","party_id":"B","chat.dumber.sent_at_ms":now,"reason":"user_hangup"}});
+        crate::calls::receive(&mut book, &id, &session, &e);
+        assert!(book.call_inbox.is_empty());
+        e["e2ee"] = json!(true);
+        e["sender"] = json!("@mallory:example.org");
+        crate::calls::receive(&mut book, &id, &session, &e);
+        assert!(book.call_inbox.is_empty());
+        e["sender"] = json!("@bob:example.org");
+        crate::calls::receive(&mut book, &id, &session, &e);
+        crate::calls::receive(&mut book, &id, &session, &e);
+        assert_eq!(book.call_inbox.len(), 1);
+        let mut restored: AddressBook =
+            serde_json::from_slice(&serde_json::to_vec(&book).unwrap()).unwrap();
+        assert_eq!(
+            restored.call_inbox["$call"].sender.phone.as_deref(),
+            Some("+15555550102")
+        );
+        restored.call_inbox.clear();
+        restored.call_seen.insert("$call".into(), now + 60000);
+        crate::calls::receive(&mut restored, &id, &session, &e);
+        assert!(restored.call_inbox.is_empty());
+        e["event_id"] = json!("$expired");
+        e["content"]["chat.dumber.sent_at_ms"] = json!(now - 60001);
+        crate::calls::receive(&mut restored, &id, &session, &e);
+        assert!(restored.call_inbox.is_empty());
+        assert!(restored.message("!room:example.org", &e).is_none());
     }
 
     #[test]
