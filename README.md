@@ -1,9 +1,9 @@
 # dumber-chat-core
 
 Portable Rust messaging library for dumber.chat. Provides phone-number login,
-contact lookup, private one-to-one Matrix rooms, and end-to-end encrypted text
-messaging using the Matrix Rust SDK. Builds as an `rlib` and `cdylib`; Android
-uses the shared typed Kotlin binding in `bindings/kotlin`.
+contact lookup, end-to-end encrypted text messaging and voice calls.
+
+The library builds as an `rlib` and `cdylib`; Android uses the shared typed Kotlin binding in `bindings/kotlin`.
 
 ## Build and check
 
@@ -16,10 +16,6 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
-
-This repository can be cloned and built independently. In the dumber.chat
-application checkout it also remains a member of the parent Cargo workspace,
-so the existing Android build script continues to work.
 
 ## Use from Rust
 
@@ -35,9 +31,10 @@ use dumber_chat_core::Client;
 
 // Generate the store password once (at least 32 characters of random material)
 // and persist it using the host platform's secure storage.
-let client = Client::new("https://nokings.chat")?
+let client = Client::new("https://dumber.chat")?
     .with_crypto_store(private_store_directory, persistent_store_password);
 client.request_code(phone_number)?;
+// Ask the user to enter the sms code or retrieve it from the SMS app
 let session = client.verify(phone_number, sms_code)?;
 let conversation = client.open_chat(&session, recipient_phone_number)?;
 let sent = client.send_text(&session, &conversation.id, "Hello!", unique_transaction_id)?;
@@ -56,22 +53,6 @@ messages and conversation changes; it is not a history restore operation.
 There is no `history` method, pagination cursor, or history-page type.
 Losing the application's message database loses that device's history. Signing
 in on a new device or importing encryption keys does not restore message content.
-
-This is an API contract, not an enforced backend retention policy: the current
-Matrix/Synapse transport still persists encrypted events. Removing history
-fetching does not delete those events. A backend delivery/retention change is
-still required to implement the temporary delivery queue and its deletion policy.
-The API does not yet offer a delivery acknowledgement that deletes server data.
-
-The phone service supplies `/api/auth/request-code`, `/api/auth/verify`,
-`/api/directory/lookup`, `/api/directory/resolve`, `/api/session`, and browser-pairing endpoints. It is a separate component;
-Synapse alone does not supply those endpoints. Messages go directly to Matrix.
-Phone arguments use canonical E.164 form, such as `+46701234567`. The library
-resolves and caches identities internally; there are no public Rust `lookup` or
-`resolve` methods. `open_chat` reuses known active conversations without another
-directory lookup, and `send_text` never queries the directory. Mappings and room
-IDs are stored encrypted alongside the SDK store and survive restarts. Keep
-sync running to observe membership changes.
 
 ### Typed results
 
